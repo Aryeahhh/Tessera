@@ -1,0 +1,35 @@
+# --- Local-only blueprint & design docs (never tracked) ---
+docs/
+CLAUDE.md
+
+# --- Rust / Cargo ---
+/target/
+**/target/
+debug/
+*.rs.bk
+*.pdb
+# NOTE: Cargo.lock IS tracked — this workspace ships binaries (tessera-api).
+
+# --- Benchmark / profiling artifacts ---
+/bench-results/
+*.flamegraph
+perf.data*
+*.profraw
+
+# --- Model weights & tokenizer assets (large, fetched locally) ---
+/models/
+*.gguf
+*.safetensors
+*.bin
+
+# --- Editor / OS noise ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Logs & scratch ---
+*.log
+/tmp/
+/scratch/
