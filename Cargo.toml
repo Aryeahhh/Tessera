@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tessera-core",
+    "crates/tessera-runtime-mock",
+    "crates/tessera-runtime-real",
+    "crates/tessera-api",
+    "crates/tessera-bench",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.96"
+publish = false
+
+[workspace.dependencies]
+tessera-core = { path = "crates/tessera-core" }
+tessera-runtime-mock = { path = "crates/tessera-runtime-mock" }
+thiserror = "2"
