@@ -18,3 +18,4 @@ publish = false
 tessera-core = { path = "crates/tessera-core" }
 tessera-runtime-mock = { path = "crates/tessera-runtime-mock" }
 thiserror = "2"
+proptest = "1"

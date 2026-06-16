@@ -6,13 +6,17 @@
 //! trait defined here, keeping the dependency graph acyclic (see `CLAUDE.md`
 //! §2.1).
 //!
-//! Build status: Layer 0 (foundation). Only the runtime contract and shared
-//! identifier newtypes exist so far; the allocator, sequence, scheduler, and
-//! engine modules arrive in later layers.
+//! Build status: Layer 1 (memory). The paged-KV [`BlockAllocator`] and
+//! [`Sequence`] block table now exist alongside the runtime contract; the
+//! scheduler and engine loop arrive in later layers.
 #![forbid(unsafe_code)]
 
+pub mod block;
 mod ids;
 pub mod runtime;
+pub mod sequence;
 
+pub use block::{AllocError, BlockAllocator, PhysicalBlockId, BLOCK_SIZE};
 pub use ids::{SeqId, TokenId};
 pub use runtime::{ModelRuntime, RuntimeError};
+pub use sequence::{SamplingParams, SeqState, Sequence};
