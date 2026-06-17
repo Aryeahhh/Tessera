@@ -418,6 +418,7 @@ name = "tessera-core"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "tessera-runtime-mock",
  "thiserror",
 ]
 

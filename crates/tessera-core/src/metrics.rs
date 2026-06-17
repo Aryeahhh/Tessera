@@ -1,0 +1,18 @@
+//! Engine-internal counters.
+//!
+//! Transport-agnostic by design: the engine only increments these, and the API
+//! layer (Layer 6) maps them onto a metrics exposition format. Keeping the type
+//! here means the core has no dependency on any metrics/HTTP crate.
+
+/// Cumulative engine counters, snapshotted by value.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EngineMetrics {
+    /// Engine steps executed.
+    pub steps: u64,
+    /// Sequences admitted from the waiting queue (prefill starts).
+    pub sequences_admitted: u64,
+    /// Sequences that reached completion.
+    pub sequences_finished: u64,
+    /// Output tokens generated across all sequences.
+    pub tokens_generated: u64,
+}

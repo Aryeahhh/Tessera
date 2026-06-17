@@ -6,17 +6,24 @@
 //! trait defined here, keeping the dependency graph acyclic (see `CLAUDE.md`
 //! §2.1).
 //!
-//! Build status: Layer 1 (memory). The paged-KV [`BlockAllocator`] and
-//! [`Sequence`] block table now exist alongside the runtime contract; the
-//! scheduler and engine loop arrive in later layers.
+//! Build status: Layer 2 (execution loop). The continuous-batching [`Engine`]
+//! drives the paged-KV [`BlockAllocator`] and [`Sequence`] block table under a
+//! pluggable [`SchedulerPolicy`] (FCFS today). Scheduling refinements, prefix
+//! sharing, and a real runtime arrive in later layers.
 #![forbid(unsafe_code)]
 
 pub mod block;
+pub mod engine;
 mod ids;
+pub mod metrics;
 pub mod runtime;
+pub mod scheduler;
 pub mod sequence;
 
 pub use block::{AllocError, BlockAllocator, PhysicalBlockId, BLOCK_SIZE};
+pub use engine::{Engine, EngineConfig, EngineError, StepTrace};
 pub use ids::{SeqId, TokenId};
+pub use metrics::EngineMetrics;
 pub use runtime::{ModelRuntime, RuntimeError};
+pub use scheduler::{Fcfs, SchedulerPolicy, StepPlan};
 pub use sequence::{SamplingParams, SeqState, Sequence};

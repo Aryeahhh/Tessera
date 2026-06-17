@@ -177,6 +177,16 @@ impl Sequence {
         blocks_for_len(len).saturating_sub(self.block_table.len())
     }
 
+    /// Additional blocks required for the one token this sequence will produce
+    /// next step (covering logical length `len() + 1`).
+    ///
+    /// Used by the scheduler to size the per-step budget uniformly across newly
+    /// admitted (prefill) and already running (decode) sequences.
+    #[must_use]
+    pub fn blocks_needed_for_next(&self) -> usize {
+        blocks_for_len(self.len() + 1).saturating_sub(self.block_table.len())
+    }
+
     /// Grow the block table to cover the sequence's current length, allocating
     /// from `alloc`. Returns the number of blocks added.
     ///
