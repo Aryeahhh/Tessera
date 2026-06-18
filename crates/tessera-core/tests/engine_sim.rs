@@ -39,6 +39,7 @@ fn engine_with(rt: MockRuntime, pool: usize, seqs: Vec<Sequence>) -> Engine<Mock
         Fcfs,
         EngineConfig {
             eos_token: Some(EOS),
+            ..Default::default()
         },
     );
     for seq in seqs {

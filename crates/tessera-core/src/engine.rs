@@ -3,9 +3,9 @@
 //! The [`Engine`] owns all authoritative serving state — the waiting queue, the
 //! running set, the [`BlockAllocator`], the injected runtime, and the scheduling
 //! policy — and advances it one deterministic step at a time:
-//! `schedule → admit → execute → reconcile` (see `docs/SPEC.md §4.1`). There is
-//! no shared mutable state and no locking; determinism is a feature, so the loop
-//! is replayable from a script (the sim harness relies on this).
+//! `schedule → preempt → admit → execute → reconcile` (see `docs/SPEC.md §4.1`).
+//! There is no shared mutable state and no locking; determinism is a feature, so
+//! the loop is replayable from a script (the sim harness relies on this).
 
 use std::collections::{HashSet, VecDeque};
 
@@ -17,10 +17,27 @@ use crate::scheduler::SchedulerPolicy;
 use crate::sequence::{SeqState, Sequence};
 
 /// Engine configuration knobs.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct EngineConfig {
     /// Token that ends generation when produced. It is not appended to output.
     pub eos_token: Option<TokenId>,
+
+    /// Preemption recovery threshold: a victim with `len() <= swap_threshold_tokens`
+    /// is recovered by **recompute**, a longer one by **swap**. The block lifecycle
+    /// is identical for both today (blocks are reclaimed and rebuilt on resume);
+    /// the distinction drives the recovery accounting that a real KV runtime
+    /// (Layer 5) turns into recompute-vs-copy. Defaults to [`usize::MAX`]
+    /// (always recompute).
+    pub swap_threshold_tokens: usize,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            eos_token: None,
+            swap_threshold_tokens: usize::MAX,
+        }
+    }
 }
 
 /// Errors raised while stepping the engine.
@@ -30,11 +47,15 @@ pub enum EngineError {
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
 
-    /// The KV pool was exhausted mid-step. With a correct admission plan this
-    /// cannot happen; it signals oversubscription that preemption (Layer 3) will
-    /// handle.
+    /// The KV pool was exhausted mid-step. With a correct plan this cannot
+    /// happen; it signals a scheduler bug.
     #[error(transparent)]
     Alloc(#[from] AllocError),
+
+    /// A waiting sequence's footprint exceeds the whole pool, so it can never be
+    /// scheduled — the engine would otherwise spin forever making no progress.
+    #[error("a waiting sequence needs {needed} blocks but the pool holds only {capacity}")]
+    Unschedulable { needed: usize, capacity: usize },
 }
 
 /// A record of what one step did, for tracing and tests.
@@ -42,10 +63,12 @@ pub enum EngineError {
 pub struct StepTrace {
     /// Step index, starting at 0.
     pub step: u64,
-    /// Sequences admitted (prefilled) this step.
+    /// Sequences admitted this step (fresh prefill or resumed preemption).
     pub admitted: Vec<SeqId>,
     /// Sequences decoded this step.
     pub decoded: Vec<SeqId>,
+    /// Sequences preempted this step.
+    pub preempted: Vec<SeqId>,
     /// Sequences that finished this step.
     pub finished: Vec<SeqId>,
     /// Running-set size after reconciliation.
@@ -129,7 +152,7 @@ where
         self.allocator.free_blocks()
     }
 
-    /// Run one engine step: schedule, admit, execute, reconcile.
+    /// Run one engine step: schedule, preempt, admit, execute, reconcile.
     pub fn step(&mut self) -> Result<StepTrace, EngineError> {
         let plan = self
             .policy
@@ -138,8 +161,23 @@ where
         let admit: HashSet<SeqId> = plan.prefill.iter().copied().collect();
         let decode: HashSet<SeqId> = plan.decode.iter().copied().collect();
 
+        // Free victims' blocks first so admission/growth always fits the pool.
+        let preempted = self.preempt(&plan.preempt);
         let admitted = self.admit(&admit);
         self.metrics.sequences_admitted += admitted.len() as u64;
+
+        if self.running.is_empty() && !self.waiting.is_empty() {
+            let needed = self
+                .waiting
+                .iter()
+                .map(Sequence::footprint_after_next)
+                .min()
+                .unwrap_or(0);
+            return Err(EngineError::Unschedulable {
+                needed,
+                capacity: self.allocator.total_blocks(),
+            });
+        }
 
         let decoded = self.execute(&admit, &decode)?;
         let finished = self.reconcile();
@@ -149,6 +187,7 @@ where
             step: self.step_count,
             admitted,
             decoded,
+            preempted,
             finished,
             running_after: self.running.len(),
             free_blocks_after: self.allocator.free_blocks(),
@@ -165,6 +204,41 @@ where
             traces.push(self.step()?);
         }
         Ok(traces)
+    }
+
+    /// Evict the victim sequences: reclaim their blocks and return them to the
+    /// waiting queue as `Preempted`, so a later step can resume them.
+    fn preempt(&mut self, victims: &[SeqId]) -> Vec<SeqId> {
+        if victims.is_empty() {
+            return Vec::new();
+        }
+        let vset: HashSet<SeqId> = victims.iter().copied().collect();
+
+        let mut kept = Vec::with_capacity(self.running.len());
+        let mut evicted = Vec::new();
+        for seq in self.running.drain(..) {
+            if vset.contains(&seq.id()) {
+                evicted.push(seq);
+            } else {
+                kept.push(seq);
+            }
+        }
+        self.running = kept;
+
+        let mut ids = Vec::with_capacity(evicted.len());
+        for mut seq in evicted {
+            self.metrics.preemptions += 1;
+            if seq.len() <= self.config.swap_threshold_tokens {
+                self.metrics.preemptions_recompute += 1;
+            } else {
+                self.metrics.preemptions_swap += 1;
+            }
+            seq.free_blocks(&mut self.allocator);
+            seq.set_state(SeqState::Preempted);
+            ids.push(seq.id());
+            self.waiting.push_front(seq);
+        }
+        ids
     }
 
     /// Move admitted sequences from the waiting queue into the running set,
@@ -188,7 +262,7 @@ where
         admitted
     }
 
-    /// Run prefill for newly admitted sequences and decode for running ones.
+    /// Run prefill for fresh admissions, decode for resumed and running ones.
     fn execute(
         &mut self,
         admit: &HashSet<SeqId>,
@@ -198,17 +272,22 @@ where
         for idx in 0..self.running.len() {
             let id = self.running[idx].id();
             if admit.contains(&id) {
-                // Prefill clones the prompt once per sequence — off the decode
-                // hot path, which allocates nothing.
-                let prompt = self.running[idx].prompt_tokens().to_vec();
-                let token = self.runtime.prefill(id, &prompt)?;
-                self.apply_token(idx, token)?;
+                if self.running[idx].output_tokens().is_empty() {
+                    // Fresh admission: prefill the prompt, emit the first token.
+                    // The clone is once per sequence, off the decode hot path.
+                    let prompt = self.running[idx].prompt_tokens().to_vec();
+                    let token = self.runtime.prefill(id, &prompt)?;
+                    self.apply_token(idx, token)?;
+                } else {
+                    // Resume a preempted sequence: its blocks were reclaimed, so
+                    // the next decode rebuilds them and continues generation
+                    // exactly where it left off (output is unchanged).
+                    let last = self.last_token(idx);
+                    let token = self.runtime.decode(id, last)?;
+                    self.apply_token(idx, token)?;
+                }
             } else if decode.contains(&id) {
-                let last = self.running[idx]
-                    .output_tokens()
-                    .last()
-                    .copied()
-                    .expect("decoded sequence has at least one prior token");
+                let last = self.last_token(idx);
                 let token = self.runtime.decode(id, last)?;
                 self.apply_token(idx, token)?;
                 decoded.push(id);
@@ -232,6 +311,15 @@ where
             self.finished.push(seq);
         }
         finished_ids
+    }
+
+    /// Most recent token of running sequence `idx` (its last output token).
+    fn last_token(&self, idx: usize) -> TokenId {
+        self.running[idx]
+            .output_tokens()
+            .last()
+            .copied()
+            .expect("a decoded or resumed sequence has at least one prior token")
     }
 
     /// Apply a produced token to running sequence `idx`: detect EOS / max-tokens,
@@ -306,6 +394,7 @@ mod tests {
             Fcfs,
             EngineConfig {
                 eos_token: Some(TokenId(7)),
+                ..Default::default()
             },
         );
         engine.submit(Sequence::new(
@@ -320,5 +409,28 @@ mod tests {
         assert_eq!(engine.finished().len(), 1);
         assert!(engine.finished()[0].output_tokens().is_empty());
         assert_eq!(engine.metrics().tokens_generated, 0);
+    }
+
+    #[test]
+    fn oversized_request_is_unschedulable() {
+        // A prompt that needs more blocks than the whole pool can never run.
+        let mut engine = Engine::new(
+            BlockAllocator::new(1),
+            ConstRuntime(TokenId(9)),
+            Fcfs,
+            EngineConfig::default(),
+        );
+        let big_prompt = (0..40u32).map(TokenId).collect();
+        engine.submit(Sequence::new(
+            SeqId(1),
+            big_prompt,
+            SamplingParams::default(),
+            0,
+        ));
+
+        assert!(matches!(
+            engine.step(),
+            Err(EngineError::Unschedulable { capacity: 1, .. })
+        ));
     }
 }

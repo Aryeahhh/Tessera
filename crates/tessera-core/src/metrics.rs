@@ -15,4 +15,10 @@ pub struct EngineMetrics {
     pub sequences_finished: u64,
     /// Output tokens generated across all sequences.
     pub tokens_generated: u64,
+    /// Preemptions performed (running sequences evicted under memory pressure).
+    pub preemptions: u64,
+    /// Preemptions recovered by recompute (drop blocks, rebuild on resume).
+    pub preemptions_recompute: u64,
+    /// Preemptions recovered by swap (evict blocks to host, restore on resume).
+    pub preemptions_swap: u64,
 }

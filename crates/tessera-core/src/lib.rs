@@ -6,10 +6,11 @@
 //! trait defined here, keeping the dependency graph acyclic (see `CLAUDE.md`
 //! §2.1).
 //!
-//! Build status: Layer 2 (execution loop). The continuous-batching [`Engine`]
-//! drives the paged-KV [`BlockAllocator`] and [`Sequence`] block table under a
-//! pluggable [`SchedulerPolicy`] (FCFS today). Scheduling refinements, prefix
-//! sharing, and a real runtime arrive in later layers.
+//! Build status: Layer 3 (scheduling). The continuous-batching [`Engine`] now
+//! does safety-checked admission and preemption (recompute/swap recovery) behind
+//! pluggable [`SchedulerPolicy`] implementations ([`Fcfs`] and [`Priority`]), so
+//! sustained overload never exceeds the pool. Prefix sharing and a real runtime
+//! arrive in later layers.
 #![forbid(unsafe_code)]
 
 pub mod block;
@@ -25,5 +26,5 @@ pub use engine::{Engine, EngineConfig, EngineError, StepTrace};
 pub use ids::{SeqId, TokenId};
 pub use metrics::EngineMetrics;
 pub use runtime::{ModelRuntime, RuntimeError};
-pub use scheduler::{Fcfs, SchedulerPolicy, StepPlan};
+pub use scheduler::{Fcfs, Priority, SchedulerPolicy, StepPlan};
 pub use sequence::{SamplingParams, SeqState, Sequence};

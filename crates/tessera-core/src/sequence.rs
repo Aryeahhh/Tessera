@@ -187,6 +187,17 @@ impl Sequence {
         blocks_for_len(self.len() + 1).saturating_sub(self.block_table.len())
     }
 
+    /// Total blocks this sequence will hold after producing its next token
+    /// (covering logical length `len() + 1`), independent of what it holds now.
+    ///
+    /// The scheduler packs these footprints into the pool to size the active set;
+    /// it is the same value whether the sequence is running, freshly waiting, or
+    /// a preempted sequence whose blocks were reclaimed.
+    #[must_use]
+    pub fn footprint_after_next(&self) -> usize {
+        blocks_for_len(self.len() + 1)
+    }
+
     /// Grow the block table to cover the sequence's current length, allocating
     /// from `alloc`. Returns the number of blocks added.
     ///

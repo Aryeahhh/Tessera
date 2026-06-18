@@ -1,19 +1,15 @@
-//! First-come, first-served admission.
+//! First-come, first-served scheduling.
 
 use std::collections::VecDeque;
 
-use super::{SchedulerPolicy, StepPlan};
+use super::{select_plan, Candidate, SchedulerPolicy, StepPlan};
 use crate::block::BlockAllocator;
 use crate::sequence::Sequence;
 
-/// Admits waiting sequences in arrival order while the block budget allows,
-/// after first reserving room for every running sequence to grow one block this
-/// step.
-///
-/// Admission stops at the first waiting sequence that does not fit
-/// (head-of-line blocking), so queue order is strictly honored. Growth safety
-/// margins and preemption are added in Layer 3; this policy only guarantees the
-/// budget is not exceeded *this* step.
+/// Admits and retains sequences in arrival order. Under memory pressure the
+/// newest (latest-arrived) running sequences are preempted first, so the oldest
+/// requests are protected and the queue drains in order. Admission stops at the
+/// first request that does not fit (head-of-line blocking).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Fcfs;
 
@@ -24,33 +20,17 @@ impl SchedulerPolicy for Fcfs {
         running: &[Sequence],
         alloc: &BlockAllocator,
     ) -> StepPlan {
-        let mut budget = alloc.free_blocks();
-
-        // Reserve growth for the running set first: every running sequence may
-        // need a fresh block to hold the token it produces this step.
-        let mut decode = Vec::with_capacity(running.len());
-        for seq in running {
-            decode.push(seq.id());
-            budget = budget.saturating_sub(seq.blocks_needed_for_next());
-        }
-
-        // Admit from the front of the queue while prefill fits the remainder.
-        let mut prefill = Vec::new();
-        for seq in waiting {
-            let need = seq.blocks_needed_for_next();
-            if need <= budget {
-                prefill.push(seq.id());
-                budget -= need;
-            } else {
-                break;
-            }
-        }
-
-        StepPlan {
-            prefill,
-            decode,
-            preempt: Vec::new(),
-        }
+        let wvec: Vec<&Sequence> = waiting.iter().collect();
+        let mut order: Vec<Candidate> = (0..running.len())
+            .map(Candidate::Running)
+            .chain((0..wvec.len()).map(Candidate::Waiting))
+            .collect();
+        // Oldest arrival first; on a tie prefer the already-running sequence.
+        order.sort_by_key(|&cand| match cand {
+            Candidate::Running(i) => (running[i].arrival(), false),
+            Candidate::Waiting(i) => (wvec[i].arrival(), true),
+        });
+        select_plan(running, &wvec, &order, alloc.total_blocks())
     }
 }
 
