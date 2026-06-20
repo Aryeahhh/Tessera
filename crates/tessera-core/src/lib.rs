@@ -6,11 +6,11 @@
 //! trait defined here, keeping the dependency graph acyclic (see `CLAUDE.md`
 //! §2.1).
 //!
-//! Build status: Layer 3 (scheduling). The continuous-batching [`Engine`] now
-//! does safety-checked admission and preemption (recompute/swap recovery) behind
-//! pluggable [`SchedulerPolicy`] implementations ([`Fcfs`] and [`Priority`]), so
-//! sustained overload never exceeds the pool. Prefix sharing and a real runtime
-//! arrive in later layers.
+//! Build status: Layer 4 (prefix sharing). On top of safety-checked admission
+//! and preemption, the engine now shares identical prompt-prefix blocks across
+//! sequences via a refcounted prefix cache, with copy-on-write on divergent
+//! writes ([`BlockAllocator::copy_on_write`], [`Sequence::fork`]). A real model
+//! runtime arrives in the next layer.
 #![forbid(unsafe_code)]
 
 pub mod block;
@@ -21,7 +21,7 @@ pub mod runtime;
 pub mod scheduler;
 pub mod sequence;
 
-pub use block::{AllocError, BlockAllocator, PhysicalBlockId, BLOCK_SIZE};
+pub use block::{AllocError, BlockAllocator, BlockHash, PhysicalBlockId, BLOCK_SIZE};
 pub use engine::{Engine, EngineConfig, EngineError, StepTrace};
 pub use ids::{SeqId, TokenId};
 pub use metrics::EngineMetrics;

@@ -8,7 +8,9 @@
 
 use std::time::Instant;
 
-use crate::block::{blocks_for_len, AllocError, BlockAllocator, PhysicalBlockId, BLOCK_SIZE};
+use crate::block::{
+    blocks_for_len, chained_block_hashes, AllocError, BlockAllocator, PhysicalBlockId, BLOCK_SIZE,
+};
 use crate::ids::{SeqId, TokenId};
 
 /// Lifecycle state of a sequence.
@@ -227,6 +229,68 @@ impl Sequence {
         }
         self.block_table.clear();
     }
+
+    /// Populate the block table for this prompt's complete blocks, sharing any
+    /// whose prefix is already cached (zero copy, zero recompute). Returns the
+    /// number of blocks that were shared rather than freshly allocated.
+    ///
+    /// Only called on a fresh sequence (empty block table); the trailing partial
+    /// prompt block and generated tokens are allocated by [`reserve`](Self::reserve)
+    /// during execution, since a partial block is never shareable.
+    pub fn share_prefix(&mut self, alloc: &mut BlockAllocator) -> Result<usize, AllocError> {
+        debug_assert!(
+            self.block_table.is_empty(),
+            "share_prefix on a non-empty block table"
+        );
+        let mut shared = 0;
+        for hash in chained_block_hashes(&self.prompt_tokens) {
+            let (block, was_shared) = alloc.allocate_shared(hash)?;
+            if was_shared {
+                shared += 1;
+            }
+            self.block_table.push(block);
+        }
+        Ok(shared)
+    }
+
+    /// Create a child sequence that shares all of this sequence's blocks,
+    /// bumping their refcounts (the OS `fork()` pattern). The child inherits the
+    /// tokens and state; a later divergent write triggers copy-on-write via
+    /// [`ensure_writable`](Self::ensure_writable).
+    #[must_use]
+    pub fn fork(&self, child_id: SeqId, alloc: &mut BlockAllocator) -> Self {
+        for &block in &self.block_table {
+            alloc.incref(block);
+        }
+        Self {
+            id: child_id,
+            state: self.state,
+            prompt_tokens: self.prompt_tokens.clone(),
+            output_tokens: self.output_tokens.clone(),
+            block_table: self.block_table.clone(),
+            priority: self.priority,
+            sampling: self.sampling,
+            arrival: Instant::now(),
+            first_token_at: self.first_token_at,
+        }
+    }
+
+    /// Ensure the block holding the next token position (`len()`) exists and is
+    /// privately owned, allocating a new block or performing copy-on-write on a
+    /// shared block as needed. Call this immediately before [`push_output`](Self::push_output)
+    /// on the copy-on-write write path.
+    pub fn ensure_writable(&mut self, alloc: &mut BlockAllocator) -> Result<(), AllocError> {
+        let idx = self.len() / BLOCK_SIZE;
+        if idx < self.block_table.len() {
+            let block = self.block_table[idx];
+            if alloc.refcount(block) > 1 {
+                self.block_table[idx] = alloc.copy_on_write(block)?;
+            }
+        } else {
+            self.block_table.push(alloc.allocate_block()?);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -314,5 +378,88 @@ mod tests {
         assert_eq!(seq.first_token_at(), Some(first));
         assert_eq!(seq.output_tokens().len(), 2);
         assert_eq!(seq.len(), 4);
+    }
+
+    #[test]
+    fn shared_system_prompt_shares_blocks_until_divergence() {
+        // A 40-token prompt is two complete blocks plus a partial tail.
+        let mut alloc = BlockAllocator::new(16);
+        let common = tokens(2 * BLOCK_SIZE + 8);
+
+        let mut a = Sequence::new(SeqId(1), common.clone(), SamplingParams::default(), 0);
+        assert_eq!(a.share_prefix(&mut alloc).unwrap(), 0, "nothing cached yet");
+
+        // B shares the common system prompt but diverges inside the second block.
+        let mut diverged = common.clone();
+        diverged[BLOCK_SIZE + 4] = TokenId(9999);
+        let mut b = Sequence::new(SeqId(2), diverged, SamplingParams::default(), 0);
+        assert_eq!(
+            b.share_prefix(&mut alloc).unwrap(),
+            1,
+            "only the first block is shared"
+        );
+
+        assert_eq!(a.block_table()[0], b.block_table()[0], "first block shared");
+        assert_ne!(
+            a.block_table()[1],
+            b.block_table()[1],
+            "second block diverged"
+        );
+        assert_eq!(
+            alloc.refcount(a.block_table()[0]),
+            2,
+            "shared block held twice"
+        );
+        assert_eq!(
+            alloc.refcount(a.block_table()[1]),
+            1,
+            "diverged block private"
+        );
+    }
+
+    #[test]
+    fn fork_shares_blocks_then_copy_on_write_on_divergence() {
+        let mut alloc = BlockAllocator::new(8);
+        let mut parent = Sequence::new(SeqId(1), tokens(BLOCK_SIZE), SamplingParams::default(), 0);
+        parent.share_prefix(&mut alloc).unwrap(); // one complete prompt block
+
+        // Generate one token, opening a partial second block held only by parent.
+        parent.ensure_writable(&mut alloc).unwrap();
+        parent.push_output(TokenId(50));
+        let partial = parent.block_table()[1];
+        assert_eq!(alloc.refcount(partial), 1);
+
+        // Fork: the child shares every block, including the partial one.
+        let mut child = parent.fork(SeqId(2), &mut alloc);
+        assert_eq!(
+            alloc.refcount(partial),
+            2,
+            "partial block now shared by fork"
+        );
+        assert_eq!(child.block_table()[1], partial);
+
+        // The child writes a divergent token into the shared partial block.
+        child.ensure_writable(&mut alloc).unwrap();
+        child.push_output(TokenId(99));
+
+        assert_ne!(
+            child.block_table()[1],
+            partial,
+            "child copied the shared block"
+        );
+        assert_eq!(alloc.refcount(partial), 1, "parent keeps the original");
+        assert_eq!(
+            alloc.refcount(child.block_table()[1]),
+            1,
+            "child owns its copy"
+        );
+        // Outputs diverged; the shared prefix block is still shared.
+        assert_eq!(parent.output_tokens(), &[TokenId(50)]);
+        assert_eq!(child.output_tokens(), &[TokenId(50), TokenId(99)]);
+        assert_eq!(
+            alloc.refcount(parent.block_table()[0]),
+            2,
+            "prefix still shared"
+        );
     }
 }

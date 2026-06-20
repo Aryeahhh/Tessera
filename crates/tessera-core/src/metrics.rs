@@ -21,4 +21,6 @@ pub struct EngineMetrics {
     pub preemptions_recompute: u64,
     /// Preemptions recovered by swap (evict blocks to host, restore on resume).
     pub preemptions_swap: u64,
+    /// Prompt blocks shared with an existing sequence via prefix caching.
+    pub blocks_shared: u64,
 }

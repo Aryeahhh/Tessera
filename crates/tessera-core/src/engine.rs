@@ -273,8 +273,11 @@ where
             let id = self.running[idx].id();
             if admit.contains(&id) {
                 if self.running[idx].output_tokens().is_empty() {
-                    // Fresh admission: prefill the prompt, emit the first token.
-                    // The clone is once per sequence, off the decode hot path.
+                    // Fresh admission: share any cached prompt-prefix blocks,
+                    // then prefill the prompt and emit the first token. The clone
+                    // is once per sequence, off the decode hot path.
+                    let shared = self.running[idx].share_prefix(&mut self.allocator)?;
+                    self.metrics.blocks_shared += shared as u64;
                     let prompt = self.running[idx].prompt_tokens().to_vec();
                     let token = self.runtime.prefill(id, &prompt)?;
                     self.apply_token(idx, token)?;
